@@ -25,12 +25,16 @@ const bypassPatterns = [
 const HEADLESS_ROUTES = {
   // 精确匹配 (仅保留 /cart)
   exact: new Set(["/collections/keyboards"]),
-  prefixes: [],
+  prefixes: ["/account"],
   patterns: [],
 };
 
 // 最简单路由匹配：仅判断是否在 exact 集合中
 function isHeadlessRoute(path) {
+  // 前缀匹配账户路径
+  if (path.startsWith("/account")) {
+    return true;
+  }
   // 仅一条热路径，用常量比较更快
   return path === "/collections/keyboards";
 }
@@ -67,12 +71,12 @@ function shouldBypass(url) {
 // ===================================
 
 async function handleRequest(request) {
-    const startTime = performance.now();
-    
-    try {
-        const url = new URL(request.url);
-        const path = url.pathname;
-        
+  const startTime = performance.now();
+
+  try {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
     // 需要绕过的路径/子域名：直接透传到源站
     const forceShopify = shouldBypass(url);
 
@@ -85,7 +89,7 @@ async function handleRequest(request) {
         body: request.body,
         redirect: "manual", // 保持重定向响应，避免影响 checkout
       });
-      
+
       // 对于密码保护相关路径，需要重写响应中的链接和 cookie ， 否则密码开启之后， 访问 500 ， 无法跳转
       if (isPasswordRelated(path)) {
         return rewritePasswordPageResponse(response, url);
@@ -96,24 +100,24 @@ async function handleRequest(request) {
 
     // 简单路由匹配（仅当非关键路径时才考虑无头路由）
     const isHeadless = isHeadlessRoute(path);
-        const targetOrigin = isHeadless ? HEADLESS_ORIGIN : SHOPIFY_ORIGIN;
-        
-        // 构造目标 URL
+    const targetOrigin = isHeadless ? HEADLESS_ORIGIN : SHOPIFY_ORIGIN;
+
+    // 构造目标 URL
     const targetHref = targetOrigin + path + url.search;
-        
-        // 记录请求开始时间
-        const fetchStartTime = performance.now();
-        
+
+    // 记录请求开始时间
+    const fetchStartTime = performance.now();
+
     const response = await fetch(targetHref, {
-            method: request.method,
+      method: request.method,
       headers: request.headers,
-            body: request.body,
+      body: request.body,
       redirect: "follow",
-        });
-        
-        const fetchEndTime = performance.now();
-        const totalDuration = fetchEndTime - startTime;
-        const fetchDuration = fetchEndTime - fetchStartTime;
+    });
+
+    const fetchEndTime = performance.now();
+    const totalDuration = fetchEndTime - startTime;
+    const fetchDuration = fetchEndTime - fetchStartTime;
     console.log(
       `✅ ${request.method} ${path} -> ${
         isHeadless ? "HEADLESS" : "SHOPIFY"
@@ -122,20 +126,20 @@ async function handleRequest(request) {
       )}ms`
     );
 
-        return response;
-    } catch (error) {
-        const endTime = performance.now();
-        const duration = endTime - startTime;
-        console.error(`❌ 请求失败 (${duration.toFixed(2)}ms):`, error.message);
-        
+    return response;
+  } catch (error) {
+    const endTime = performance.now();
+    const duration = endTime - startTime;
+    console.error(`❌ 请求失败 (${duration.toFixed(2)}ms):`, error.message);
+
     return new Response("Internal Server Error", {
-            status: 500,
-            headers: {
+      status: 500,
+      headers: {
         "Content-Type": "text/plain",
         "Cache-Control": "no-cache",
       },
-        });
-    }
+    });
+  }
 }
 
 // 处理密码页面响应
@@ -158,12 +162,12 @@ async function rewritePasswordPageResponse(response, originalUrl) {
             new RegExp(`http://${escapedDomain}`, "gi"),
             `https://${originalUrl.hostname}`
           );
-        
+
         // 如果是相对路径，确保使用当前域名
         if (newLocation.startsWith("/")) {
           newLocation = `https://${originalUrl.hostname}${newLocation}`;
         }
-        
+
         newHeaders.set("location", newLocation);
       }
     }
@@ -173,22 +177,24 @@ async function rewritePasswordPageResponse(response, originalUrl) {
     if (setCookieHeaders && setCookieHeaders.length > 0) {
       // 删除所有旧的 Set-Cookie headers
       newHeaders.delete("set-cookie");
-      
+
       // 重写每个 cookie 的 domain
       setCookieHeaders.forEach((cookie) => {
         // 移除或替换 myshopify.com domain，改为当前域名
         let rewrittenCookie = cookie
           .replace(/domain=\.?[^;]*\.myshopify\.com/gi, "") // 移除 myshopify.com domain
           .replace(/domain=[^;]+/gi, ""); // 移除其他 domain
-        
+
         // 清理多余的分号
-        rewrittenCookie = rewrittenCookie.replace(/^;\s*/, "").replace(/;\s*$/, "");
-        
+        rewrittenCookie = rewrittenCookie
+          .replace(/^;\s*/, "")
+          .replace(/;\s*$/, "");
+
         // 添加新的 domain（如果需要且 cookie 不为空）
         if (rewrittenCookie && !rewrittenCookie.includes("domain=")) {
           rewrittenCookie += `; domain=${originalUrl.hostname}`;
         }
-        
+
         if (rewrittenCookie) {
           newHeaders.append("set-cookie", rewrittenCookie.trim());
         }
@@ -199,13 +205,10 @@ async function rewritePasswordPageResponse(response, originalUrl) {
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("text/html")) {
       let body = await response.text();
-      
+
       // 替换 myshopify.com 域名为当前域名（转义特殊字符）
-      body = body.replace(
-        new RegExp(escapedDomain, "g"),
-        originalUrl.hostname
-      );
-      
+      body = body.replace(new RegExp(escapedDomain, "g"), originalUrl.hostname);
+
       // 替换 https:// 协议中的域名
       body = body.replace(
         new RegExp(`https://${escapedDomain}`, "g"),
@@ -246,5 +249,5 @@ async function rewritePasswordPageResponse(response, originalUrl) {
 // ===================================
 
 addEventListener("fetch", (event) => {
-    event.respondWith(handleRequest(event.request));
+  event.respondWith(handleRequest(event.request));
 });
