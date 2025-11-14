@@ -31,6 +31,10 @@ const HEADLESS_ROUTES = {
 
 // 最简单路由匹配：仅判断是否在 exact 集合中
 function isHeadlessRoute(path) {
+  // React Router manifest 文件
+  if (path === "/__manifest") {
+    return true;
+  }
   // 前缀匹配账户路径
   if (path.startsWith("/account")) {
     return true;
@@ -77,6 +81,26 @@ async function handleRequest(request) {
     const url = new URL(request.url);
     const path = url.pathname;
 
+    // ===== 特殊处理：/account-online 映射到在线商店 /account =====
+    // 规则: nuphy.ai/account-online/*/** → nuphy-develop.myshopify.com/account/*/**
+    if (path.startsWith("/account-online")) {
+      // 去掉 -online 后缀，代理到在线商店
+      const targetPath = path.replace("/account-online", "/account");
+      const shopifyUrl = SHOPIFY_ORIGIN + targetPath + url.search;
+
+      console.log(`🏪 在线商店: ${path} -> ${targetPath}`);
+
+      const response = await fetch(shopifyUrl, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        redirect: "manual", // 手动处理重定向
+      });
+
+      // 重写响应，保留 -online 后缀
+      return await rewriteResponseForOnlineStore(response, url);
+    }
+
     // 需要绕过的路径/子域名：直接透传到源站
     const forceShopify = shouldBypass(url);
 
@@ -99,6 +123,7 @@ async function handleRequest(request) {
     }
 
     // 简单路由匹配（仅当非关键路径时才考虑无头路由）
+    // 规则: nuphy.ai/account/*/** → headless.myshopify.dev/account/*/**
     const isHeadless = isHeadlessRoute(path);
     const targetOrigin = isHeadless ? HEADLESS_ORIGIN : SHOPIFY_ORIGIN;
 
@@ -112,7 +137,7 @@ async function handleRequest(request) {
       method: request.method,
       headers: request.headers,
       body: request.body,
-      redirect: "follow",
+      redirect: "manual", // 手动处理重定向，确保正确重写 Location header
     });
 
     const fetchEndTime = performance.now();
@@ -125,6 +150,14 @@ async function handleRequest(request) {
         2
       )}ms`
     );
+
+    // 处理重定向响应 - 重写 Location header
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (location) {
+        return rewriteRedirectResponse(response, location, url, isHeadless);
+      }
+    }
 
     return response;
   } catch (error) {
@@ -139,6 +172,199 @@ async function handleRequest(request) {
         "Cache-Control": "no-cache",
       },
     });
+  }
+}
+
+// 统一的重定向响应重写函数
+function rewriteRedirectResponse(response, location, originalUrl, isHeadless) {
+  const newHeaders = new Headers(response.headers);
+  let newLocation = location;
+
+  // 处理完整 URL (包含 HEADLESS_ORIGIN 或 SHOPIFY_ORIGIN_DOMAIN)
+  if (location.includes(HEADLESS_ORIGIN)) {
+    // Headless 路由: 替换 Oxygen 域名为 nuphy.ai
+    newLocation = location.replace(
+      HEADLESS_ORIGIN,
+      `https://${originalUrl.hostname}`
+    );
+    console.log(`🔀 无头商店重定向: ${location} -> ${newLocation}`);
+  } else if (location.includes(SHOPIFY_ORIGIN_DOMAIN)) {
+    // 在线商店路由: 替换域名并添加 -online 后缀
+    const escapedDomain = SHOPIFY_ORIGIN_DOMAIN.replace(/\./g, "\\.");
+    newLocation = location
+      .replace(
+        new RegExp(`https://${escapedDomain}`, "gi"),
+        `https://${originalUrl.hostname}`
+      )
+      .replace(
+        new RegExp(`http://${escapedDomain}`, "gi"),
+        `https://${originalUrl.hostname}`
+      );
+
+    // 对路径添加 -online 后缀
+    try {
+      const urlObj = new URL(newLocation);
+      if (urlObj.pathname.startsWith("/account")) {
+        urlObj.pathname = urlObj.pathname.replace(
+          "/account",
+          "/account-online"
+        );
+      }
+      newLocation = urlObj.toString();
+    } catch (e) {
+      console.error("URL 解析失败:", e);
+    }
+    console.log(`🔀 在线商店重定向: ${location} -> ${newLocation}`);
+  }
+  // 处理相对路径
+  else if (location.startsWith("/")) {
+    if (isHeadless) {
+      // Headless 路由: 保持原路径
+      newLocation = `https://${originalUrl.hostname}${location}`;
+      console.log(`🔀 无头商店相对重定向: ${location} -> ${newLocation}`);
+    } else {
+      // 在线商店路由: 添加 -online 后缀
+      if (location.startsWith("/account")) {
+        newLocation = location.replace("/account", "/account-online");
+      }
+      newLocation = `https://${originalUrl.hostname}${newLocation}`;
+      console.log(`🔀 在线商店相对重定向: ${location} -> ${newLocation}`);
+    }
+  }
+
+  newHeaders.set("location", newLocation);
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  });
+}
+
+// 专门用于在线商店的响应重写函数（保留 -online 后缀）
+async function rewriteResponseForOnlineStore(response, originalUrl) {
+  try {
+    const newHeaders = new Headers(response.headers);
+    const escapedDomain = SHOPIFY_ORIGIN_DOMAIN.replace(/\./g, "\\.");
+
+    // 处理重定向 - 特殊处理：需要保留 -online 后缀
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (location) {
+        let newLocation = location;
+
+        // 如果是完整 URL，需要分两步处理
+        if (location.includes(SHOPIFY_ORIGIN_DOMAIN)) {
+          // 第一步：替换域名
+          newLocation = location
+            .replace(
+              new RegExp(`https://${escapedDomain}`, "gi"),
+              `https://${originalUrl.hostname}`
+            )
+            .replace(
+              new RegExp(`http://${escapedDomain}`, "gi"),
+              `https://${originalUrl.hostname}`
+            );
+
+          // 第二步：解析 URL，对路径添加 -online 后缀
+          try {
+            const urlObj = new URL(newLocation);
+            if (urlObj.pathname.startsWith("/account")) {
+              urlObj.pathname = urlObj.pathname.replace(
+                "/account",
+                "/account-online"
+              );
+            }
+            newLocation = urlObj.toString();
+          } catch (e) {
+            console.error("URL 解析失败:", e);
+          }
+        }
+        // 如果是相对路径（如 /account, /account/orders）
+        else if (newLocation.startsWith("/")) {
+          // 在 /account 路径前添加 -online 后缀
+          if (newLocation.startsWith("/account")) {
+            newLocation = newLocation.replace("/account", "/account-online");
+          }
+          newLocation = `https://${originalUrl.hostname}${newLocation}`;
+        }
+
+        console.log(`🔀 在线商店重定向: ${location} -> ${newLocation}`);
+        newHeaders.set("location", newLocation);
+      }
+    }
+
+    // 处理 Set-Cookie
+    const setCookieHeaders = response.headers.getAll("set-cookie");
+    if (setCookieHeaders && setCookieHeaders.length > 0) {
+      newHeaders.delete("set-cookie");
+      setCookieHeaders.forEach((cookie) => {
+        let rewrittenCookie = cookie
+          .replace(/domain=\.?[^;]*\.myshopify\.com/gi, "")
+          .replace(/domain=[^;]+/gi, "");
+
+        rewrittenCookie = rewrittenCookie
+          .replace(/^;\s*/, "")
+          .replace(/;\s*$/, "");
+
+        if (rewrittenCookie && !rewrittenCookie.includes("domain=")) {
+          rewrittenCookie += `; domain=.${originalUrl.hostname}`;
+        }
+
+        if (rewrittenCookie) {
+          newHeaders.append("set-cookie", rewrittenCookie.trim());
+        }
+      });
+    }
+
+    // 如果是 HTML 响应，重写内容中的链接
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("text/html")) {
+      let body = await response.text();
+
+      // 替换域名
+      body = body.replace(new RegExp(escapedDomain, "g"), originalUrl.hostname);
+      body = body.replace(
+        new RegExp(`https://${escapedDomain}`, "g"),
+        `https://${originalUrl.hostname}`
+      );
+
+      // 替换 /account 链接为 /account-online
+      body = body.replace(
+        /href="\/account([\/"?])/gi,
+        'href="/account-online$1'
+      );
+      body = body.replace(
+        /href='\/account([\/'?])/gi,
+        "href='/account-online$1"
+      );
+      // 处理没有后续字符的情况
+      body = body.replace(/href="\/account"/gi, 'href="/account-online"');
+      body = body.replace(/href='\/account'/gi, "href='/account-online'");
+
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      });
+    }
+
+    if (response.status >= 300 && response.status < 400) {
+      return new Response(null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: newHeaders,
+      });
+    }
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders,
+    });
+  } catch (error) {
+    console.error("在线商店响应重写失败:", error);
+    return response;
   }
 }
 
