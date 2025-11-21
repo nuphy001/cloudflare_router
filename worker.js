@@ -4,10 +4,9 @@
 
 // 目标无头服务（Shopify Storefront API URL）
 const HEADLESS_ORIGIN =
-  // "https://nuphy-headless-shop.vercel.app";
   "https://nuphy-develop-shop-7848d11901723dd15699.o2.myshopify.dev";
 
-// 主题商店的域名 (用于构建回源 URL)
+// 原始 Shopify 商店的域名 (用于构建回源 URL)
 const SHOPIFY_ORIGIN_DOMAIN = "nuphy-develop.myshopify.com";
 const SHOPIFY_ORIGIN = `https://${SHOPIFY_ORIGIN_DOMAIN}`;
 
@@ -32,14 +31,20 @@ const HEADLESS_ROUTES = {
 
 // 最简单路由匹配：仅判断是否在 exact 集合中
 function isHeadlessRoute(path, headlessRequest) {
-  if (headlessRequest === "1") {
+  // React Router manifest 文件
+  if (path === "/__manifest") {
     return true;
   }
   // 前缀匹配账户路径
   if (path.startsWith("/account")) {
     return true;
   }
+  // 仅一条热路径，用常量比较更快
   if (path.startsWith("/collections")) {
+    return true;
+  }
+
+  if (headlessRequest === "1") {
     return true;
   }
 }
@@ -81,17 +86,16 @@ async function handleRequest(request) {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
-    // 获取对应的 header x-headless-request 值
+    // 获取 x-headless-request
     const headlessRequest = request.headers.get("x-headless-request");
-    console.log("x-headless-request:", headlessRequest);
-    // ===== 特殊处理：/account-online 映射到主题商店 /account =====
+    // ===== 特殊处理：/account-online 映射到在线商店 /account =====
     // 规则: nuphy.ai/account-online/*/** → nuphy-develop.myshopify.com/account/*/**
     if (path.startsWith("/account-online")) {
-      // 去掉 -online 后缀，代理到主题商店
+      // 去掉 -online 后缀，代理到在线商店
       const targetPath = path.replace("/account-online", "/account");
       const shopifyUrl = SHOPIFY_ORIGIN + targetPath + url.search;
 
-      console.log(`[登录-在线商店] 开始访问: ${path} -> ${targetPath}`);
+      console.log(`🏪 在线商店: ${path} -> ${targetPath}`);
 
       const response = await fetch(shopifyUrl, {
         method: request.method,
@@ -147,7 +151,7 @@ async function handleRequest(request) {
     const totalDuration = fetchEndTime - startTime;
     const fetchDuration = fetchEndTime - fetchStartTime;
     console.log(
-      ` ${request.method} ${path} -> ${
+      `✅ ${request.method} ${path} -> ${
         isHeadless ? "HEADLESS" : "SHOPIFY"
       } | 总时间:${totalDuration.toFixed(2)}ms | 网络:${fetchDuration.toFixed(
         2
@@ -190,9 +194,7 @@ function rewriteRedirectResponse(response, location, originalUrl, isHeadless) {
       HEADLESS_ORIGIN,
       `https://${originalUrl.hostname}`
     );
-    console.log(
-      `[普通重定向]-无头请求的重定向处理， 从: ${location} -> 处理后 ${newLocation}`
-    );
+    console.log(`🔀 无头商店重定向: ${location} -> ${newLocation}`);
   } else if (location.includes(SHOPIFY_ORIGIN_DOMAIN)) {
     // 在线商店路由: 替换域名并添加 -online 后缀
     const escapedDomain = SHOPIFY_ORIGIN_DOMAIN.replace(/\./g, "\\.");
@@ -219,31 +221,26 @@ function rewriteRedirectResponse(response, location, originalUrl, isHeadless) {
     } catch (e) {
       console.error("URL 解析失败:", e);
     }
-    console.log(
-      `[普通重定向]在线商店 普通请求重定向， 从: ${location} -> 到 ${newLocation}`
-    );
+    console.log(`🔀 在线商店重定向: ${location} -> ${newLocation}`);
   }
   // 处理相对路径
   else if (location.startsWith("/")) {
-    console.log(
-      `[普通重定向]以/开头的相对路径请求重定向， 从: ${location} -> 到 ${location}`
-    );
     if (isHeadless) {
       // Headless 路由: 保持原路径
       newLocation = `https://${originalUrl.hostname}${location}`;
+      console.log(`🔀 无头商店相对重定向: ${location} -> ${newLocation}`);
     } else {
       // 在线商店路由: 添加 -online 后缀
       if (location.startsWith("/account")) {
         newLocation = location.replace("/account", "/account-online");
       }
       newLocation = `https://${originalUrl.hostname}${newLocation}`;
+      console.log(`🔀 在线商店相对重定向: ${location} -> ${newLocation}`);
     }
   }
 
   newHeaders.set("location", newLocation);
-  console.log(
-    `[普通重定向]  最终的路径 从${originalUrl.href} -> 到 ${newLocation}`
-  );
+
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -254,9 +251,6 @@ function rewriteRedirectResponse(response, location, originalUrl, isHeadless) {
 // 专门用于在线商店的响应重写函数（保留 -online 后缀）
 async function rewriteResponseForOnlineStore(response, originalUrl) {
   try {
-    console.log(
-      `[登录-在线商店] 开始重写 reponse ... {status: ${response.status}, url: ${originalUrl}`
-    );
     const newHeaders = new Headers(response.headers);
     const escapedDomain = SHOPIFY_ORIGIN_DOMAIN.replace(/\./g, "\\.");
 
@@ -302,9 +296,7 @@ async function rewriteResponseForOnlineStore(response, originalUrl) {
           newLocation = `https://${originalUrl.hostname}${newLocation}`;
         }
 
-        console.log(
-          `[登录-在线商店]重写响应完成， 从: ${location} 到新的-> ${newLocation}`
-        );
+        console.log(`🔀 在线商店重定向: ${location} -> ${newLocation}`);
         newHeaders.set("location", newLocation);
       }
     }
@@ -378,7 +370,7 @@ async function rewriteResponseForOnlineStore(response, originalUrl) {
       headers: newHeaders,
     });
   } catch (error) {
-    console.error("[在线商店]响应重写失败:", error);
+    console.error("在线商店响应重写失败:", error);
     return response;
   }
 }
