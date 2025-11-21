@@ -3,8 +3,9 @@
 // ===================================
 
 // 目标无头服务（Shopify Storefront API URL）
-const HEADLESS_ORIGIN = "https://nuphy-headless-shop.vercel.app";
-// "https://nuphy-develop-shop-7848d11901723dd15699.o2.myshopify.dev";
+const HEADLESS_ORIGIN =
+  // "https://nuphy-headless-shop.vercel.app";
+  "https://nuphy-develop-shop-7848d11901723dd15699.o2.myshopify.dev";
 
 // 主题商店的域名 (用于构建回源 URL)
 const SHOPIFY_ORIGIN_DOMAIN = "nuphy-develop.myshopify.com";
@@ -30,17 +31,17 @@ const HEADLESS_ROUTES = {
 };
 
 // 最简单路由匹配：仅判断是否在 exact 集合中
-function isHeadlessRoute(path) {
-  // React Router manifest 文件
-  if (path === "/__manifest") {
+function isHeadlessRoute(path, headlessRequest) {
+  if (headlessRequest === "1") {
     return true;
   }
   // 前缀匹配账户路径
   if (path.startsWith("/account")) {
     return true;
   }
-  // 仅一条热路径，用常量比较更快
-  return path === "/collections/keyboards";
+  if (path.startsWith("/collections")) {
+    return true;
+  }
 }
 
 // 判断是否为密码保护相关路径
@@ -80,7 +81,9 @@ async function handleRequest(request) {
   try {
     const url = new URL(request.url);
     const path = url.pathname;
-
+    // 获取对应的 header x-headless-request 值
+    const headlessRequest = request.headers.get("x-headless-request");
+    console.log("x-headless-request:", headlessRequest);
     // ===== 特殊处理：/account-online 映射到主题商店 /account =====
     // 规则: nuphy.ai/account-online/*/** → nuphy-develop.myshopify.com/account/*/**
     if (path.startsWith("/account-online")) {
@@ -124,7 +127,7 @@ async function handleRequest(request) {
 
     // 简单路由匹配（仅当非关键路径时才考虑无头路由）
     // 规则: nuphy.ai/account/*/** → headless.myshopify.dev/account/*/**
-    const isHeadless = isHeadlessRoute(path);
+    const isHeadless = isHeadlessRoute(path, headlessRequest);
     const targetOrigin = isHeadless ? HEADLESS_ORIGIN : SHOPIFY_ORIGIN;
 
     // 构造目标 URL
